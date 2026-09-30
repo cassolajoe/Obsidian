@@ -6,16 +6,21 @@ import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
 import { 
   UploadCloud, Database, FileSpreadsheet, Sparkles, CheckCircle2, 
-  BarChart3, Table as TableIcon, Layers, RefreshCw, ArrowRight, Server, ShieldCheck, Download, Search, AlertCircle
+  BarChart3, Table as TableIcon, Layers, RefreshCw, ArrowRight, Server, ShieldCheck, Download, Search, AlertCircle, ChevronDown
 } from 'lucide-react';
 import { 
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
   BarChart, Bar, PieChart, Pie, Cell 
 } from 'recharts';
-import { profileDataset, ParsedDataset } from '@/utils/dataEngine';
+import { profileDataset, ParsedDataset, IGNORED_SHEET_KEYWORDS } from '@/utils/dataEngine';
 
 export default function DynamicAutoDashboard() {
   const [dataset, setDataset] = useState<ParsedDataset | null>(null);
+  const [workbookSheets, setWorkbookSheets] = useState<Record<string, Record<string, any>[]>>({});
+  const [selectedSheet, setSelectedSheet] = useState<string>('');
+  const [selectedNumericCol, setSelectedNumericCol] = useState<string>('');
+  const [selectedCategoryCol, setSelectedCategoryCol] = useState<string>('');
+  
   const [isLoading, setIsLoading] = useState(false);
   const [activeView, setActiveView] = useState<'dashboard' | 'table' | 'ai'>('dashboard');
   const [searchTerm, setSearchTerm] = useState('');
@@ -34,7 +39,21 @@ export default function DynamicAutoDashboard() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Processar Arquivo (CSV, XLSX, XLS) com suporte a ArrayBuffer e varredura multi-aba
+  // Trocar de Aba na Planilha Excel
+  const handleSheetChange = (newSheetName: string) => {
+    if (!workbookSheets[newSheetName] || !dataset) return;
+    try {
+      setSelectedSheet(newSheetName);
+      const profiled = profileDataset(dataset.name, workbookSheets[newSheetName], newSheetName, Object.keys(workbookSheets));
+      setDataset(profiled);
+      setSelectedNumericCol(profiled.primaryNumericColumn || '');
+      setSelectedCategoryCol(profiled.primaryCategoryColumn || '');
+    } catch (err: any) {
+      setErrorMessage(err.message || `Erro ao carregar a aba "${newSheetName}".`);
+    }
+  };
+
+  // Processar Arquivo (CSV, XLSX, XLS)
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -54,8 +73,12 @@ export default function DynamicAutoDashboard() {
             if (!results.data || results.data.length === 0) {
               throw new Error('O arquivo CSV não possui dados legíveis.');
             }
-            const profiled = profileDataset(fileName, results.data as Record<string, any>[]);
+            const profiled = profileDataset(fileName, results.data as Record<string, any>[], 'Dados');
             setDataset(profiled);
+            setWorkbookSheets({ 'Dados': results.data as Record<string, any>[] });
+            setSelectedSheet('Dados');
+            setSelectedNumericCol(profiled.primaryNumericColumn || '');
+            setSelectedCategoryCol(profiled.primaryCategoryColumn || '');
           } catch (err: any) {
             setErrorMessage(err.message || 'Erro ao analisar o arquivo CSV.');
           } finally {
@@ -82,55 +105,57 @@ export default function DynamicAutoDashboard() {
             throw new Error('A planilha Excel não contém abas válidas.');
           }
 
-          let jsonRows: Record<string, any>[] = [];
-          let activeSheetName = '';
-
-          // 1. Procurar a primeira aba com dados estruturados via sheet_to_json
-          for (const sheetName of workbook.SheetNames) {
+          const sheetsMap: Record<string, Record<string, any>[]> = {};
+          
+          // Extrair todas as abas para memória
+          workbook.SheetNames.forEach((sheetName) => {
             const worksheet = workbook.Sheets[sheetName];
-            if (!worksheet) continue;
+            if (!worksheet) return;
+
+            let rows = XLSX.utils.sheet_to_json(worksheet, { defval: '' }) as Record<string, any>[];
             
-            const rows = XLSX.utils.sheet_to_json(worksheet, { defval: '' }) as Record<string, any>[];
-            if (rows && rows.length > 0) {
-              jsonRows = rows;
-              activeSheetName = sheetName;
-              break;
-            }
-          }
-
-          // 2. Fallback: Se não encontrou cabeçalhos na linha 1, tentar varredura de matriz (header: 1)
-          if (!jsonRows || jsonRows.length === 0) {
-            for (const sheetName of workbook.SheetNames) {
-              const worksheet = workbook.Sheets[sheetName];
-              if (!worksheet) continue;
-
+            // Fallback se não encontrar dados simples
+            if (!rows || rows.length === 0) {
               const matrix = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' }) as any[][];
               const nonEmptyMatrix = matrix.filter(r => r && r.length > 0 && r.some(cell => cell !== null && cell !== ''));
               
               if (nonEmptyMatrix.length > 1) {
-                // Primeira linha preenchida vira os cabeçalhos
                 const headerRow = nonEmptyMatrix[0];
                 const headers = headerRow.map((h, i) => (h && String(h).trim() ? String(h).trim() : `Coluna_${i + 1}`));
                 
-                jsonRows = nonEmptyMatrix.slice(1).map(row => {
+                rows = nonEmptyMatrix.slice(1).map(row => {
                   const obj: Record<string, any> = {};
                   headers.forEach((h, i) => {
                     obj[h] = row[i] !== undefined ? row[i] : '';
                   });
                   return obj;
                 });
-                activeSheetName = sheetName;
-                break;
               }
             }
+
+            if (rows && rows.length > 0) {
+              sheetsMap[sheetName] = rows;
+            }
+          });
+
+          const allSheetNames = Object.keys(sheetsMap);
+          if (allSheetNames.length === 0) {
+            throw new Error(`Nenhum dado estruturado foi encontrado nas abas do arquivo "${fileName}".`);
           }
 
-          if (!jsonRows || jsonRows.length === 0) {
-            throw new Error(`Nenhum dado estruturado foi encontrado nas abas da planilha "${fileName}".`);
+          // Escolher a melhor aba padrão (ignorando 'Instruções', 'Capa', etc)
+          let bestSheetName = allSheetNames.find(s => !IGNORED_SHEET_KEYWORDS.some(k => s.toLowerCase().includes(k)));
+          if (!bestSheetName) {
+            bestSheetName = allSheetNames[0];
           }
 
-          const profiled = profileDataset(`${fileName} (${activeSheetName})`, jsonRows);
+          setWorkbookSheets(sheetsMap);
+          setSelectedSheet(bestSheetName);
+
+          const profiled = profileDataset(fileName, sheetsMap[bestSheetName], bestSheetName, allSheetNames);
           setDataset(profiled);
+          setSelectedNumericCol(profiled.primaryNumericColumn || '');
+          setSelectedCategoryCol(profiled.primaryCategoryColumn || '');
         } catch (err: any) {
           setErrorMessage(err.message || 'Erro ao decodificar a planilha Excel.');
         } finally {
@@ -167,11 +192,66 @@ export default function DynamicAutoDashboard() {
         regiao: ['Sudeste', 'Sul', 'Nordeste', 'Centro-Oeste'][idx % 4],
       }));
 
-      const profiled = profileDataset(`${dbConfig.type}: ${dbConfig.database}.${dbConfig.table}`, mockDbRows);
+      const profiled = profileDataset(`${dbConfig.type}: ${dbConfig.database}.${dbConfig.table}`, mockDbRows, 'Tabela BD');
       setDataset(profiled);
+      setWorkbookSheets({ 'Tabela BD': mockDbRows });
+      setSelectedSheet('Tabela BD');
+      setSelectedNumericCol(profiled.primaryNumericColumn || '');
+      setSelectedCategoryCol(profiled.primaryCategoryColumn || '');
       setIsLoading(false);
     }, 1000);
   };
+
+  // Atualizar dados de séries temporais se o usuário trocar a coluna numérica selecionada
+  const activeNumericCol = selectedNumericCol || dataset?.primaryNumericColumn;
+  const activeCategoryCol = selectedCategoryCol || dataset?.primaryCategoryColumn;
+
+  const dynamicTimeSeriesData = dataset ? (
+    dataset.timeColumn && activeNumericCol ? (
+      (() => {
+        const map = new Map<string, number>();
+        dataset.rawRows.forEach((r) => {
+          const rawDate = r[dataset.timeColumn!];
+          let dateKey = 'Outros';
+          if (rawDate instanceof Date) {
+            dateKey = rawDate.toISOString().slice(0, 10);
+          } else if (rawDate) {
+            dateKey = String(rawDate).slice(0, 10);
+          }
+          const val = parseFloat(String(r[activeNumericCol] || '0').replace(/[^\d.-]/g, '')) || 0;
+          map.set(dateKey, (map.get(dateKey) || 0) + val);
+        });
+        return Array.from(map.entries())
+          .map(([date, valor]) => ({ date, valor: Math.round(valor * 100) / 100 }))
+          .sort((a, b) => a.date.localeCompare(b.date))
+          .slice(0, 30);
+      })()
+    ) : (
+      dataset.rawRows.slice(0, 20).map((r, idx) => ({
+        date: `Linha ${idx + 1}`,
+        valor: activeNumericCol ? (parseFloat(String(r[activeNumericCol] || '0').replace(/[^\d.-]/g, '')) || 0) : idx * 10,
+      }))
+    )
+  ) : [];
+
+  const dynamicCategoryData = dataset && activeCategoryCol ? (
+    (() => {
+      const catMap = new Map<string, number>();
+      dataset.rawRows.forEach((r) => {
+        const cat = String(r[activeCategoryCol] || 'Sem Categoria');
+        const val = activeNumericCol ? (parseFloat(String(r[activeNumericCol] || '1').replace(/[^\d.-]/g, '')) || 1) : 1;
+        catMap.set(cat, (catMap.get(cat) || 0) + val);
+      });
+      const colors = ['#7CFF4F', '#00F0FF', '#A855F7', '#EC4899', '#F59E0B', '#3B82F6'];
+      return Array.from(catMap.entries())
+        .map(([name, value], idx) => ({
+          name,
+          value: Math.round(value * 100) / 100,
+          color: colors[idx % colors.length],
+        }))
+        .slice(0, 8);
+    })()
+  ) : [];
 
   return (
     <div className="space-y-6">
@@ -180,7 +260,7 @@ export default function DynamicAutoDashboard() {
       <div className="p-6 rounded-2xl bg-[#121212]/80 backdrop-blur-2xl border border-white/10 flex flex-wrap items-center justify-between gap-4 shadow-[0_10px_30px_rgba(0,0,0,0.5)]">
         <div>
           <span className="px-3 py-1 rounded-full bg-[#7CFF4F]/10 border border-[#7CFF4F]/30 text-xs font-mono text-[#7CFF4F]">
-            AUTO-DASHBOARD ENGINE V2
+            AUTO-DASHBOARD ENGINE V3 (MULTI-ABA)
           </span>
           <h2 className="text-xl font-bold text-white mt-2 flex items-center gap-2">
             <Sparkles className="w-5 h-5 text-[#7CFF4F]" />
@@ -251,14 +331,33 @@ export default function DynamicAutoDashboard() {
       ) : (
         <div className="space-y-6">
 
-          {/* DATASET SUMMARY BAR */}
-          <div className="p-4 rounded-xl bg-[#121212] border border-[#7CFF4F]/40 flex items-center justify-between backdrop-blur-xl">
+          {/* DATASET SUMMARY & SHEET SELECTOR BAR */}
+          <div className="p-4 rounded-xl bg-[#121212] border border-[#7CFF4F]/40 flex flex-wrap items-center justify-between gap-4 backdrop-blur-xl">
             <div className="flex items-center gap-3">
               <CheckCircle2 className="w-5 h-5 text-[#7CFF4F]" />
               <div>
-                <span className="text-xs font-bold text-white">{dataset.name}</span>
-                <span className="ml-3 text-xs text-white/50 font-mono">
-                  {dataset.rowCount} registros • {dataset.columnCount} colunas
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold text-white">{dataset.name}</span>
+                  
+                  {/* SELETOR DE ABAS DA PLANILHA */}
+                  {dataset.availableSheets && dataset.availableSheets.length > 1 && (
+                    <div className="relative inline-block ml-2">
+                      <select
+                        value={selectedSheet}
+                        onChange={(e) => handleSheetChange(e.target.value)}
+                        className="px-2.5 py-1 rounded-lg bg-[#7CFF4F]/10 border border-[#7CFF4F]/40 text-xs font-bold text-[#7CFF4F] focus:outline-none cursor-pointer"
+                      >
+                        {dataset.availableSheets.map((s, idx) => (
+                          <option key={idx} value={s} className="bg-[#121212] text-white">
+                            Aba: {s} {IGNORED_SHEET_KEYWORDS.some(k => s.toLowerCase().includes(k)) ? '(Instruções)' : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                </div>
+                <span className="text-[11px] text-white/50 font-mono">
+                  Aba Ativa: <strong className="text-white">{dataset.sheetName}</strong> • {dataset.rowCount} registros • {dataset.columnCount} colunas
                 </span>
               </div>
             </div>
@@ -284,6 +383,46 @@ export default function DynamicAutoDashboard() {
 
           {activeView === 'dashboard' && (
             <div className="space-y-6">
+              
+              {/* INTERACTIVE COLUMN PICKERS */}
+              <div className="p-4 rounded-xl bg-white/5 border border-white/10 flex flex-wrap items-center justify-between gap-4 text-xs">
+                <div className="flex items-center gap-4">
+                  <span className="text-white/50 font-mono">Personalizar Métricas:</span>
+                  
+                  {/* Seletor de Métrica Numérica */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-white/70">Métrica Numérica:</span>
+                    <select
+                      value={activeNumericCol || ''}
+                      onChange={(e) => setSelectedNumericCol(e.target.value)}
+                      className="px-2.5 py-1 rounded-lg bg-[#121212] border border-white/20 text-white focus:outline-none"
+                    >
+                      {dataset.columns.filter(c => c.type === 'numeric').map((col, idx) => (
+                        <option key={idx} value={col.name}>{col.name}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Seletor de Categoria */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-white/70">Categoria/Agrupamento:</span>
+                    <select
+                      value={activeCategoryCol || ''}
+                      onChange={(e) => setSelectedCategoryCol(e.target.value)}
+                      className="px-2.5 py-1 rounded-lg bg-[#121212] border border-white/20 text-white focus:outline-none"
+                    >
+                      {dataset.columns.filter(c => !c.name.startsWith('__EMPTY')).map((col, idx) => (
+                        <option key={idx} value={col.name}>{col.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <span className="text-white/40 font-mono text-[10px]">
+                  Filtros aplicados em tempo real (60 FPS)
+                </span>
+              </div>
+
               {/* AUTOMATIC KPI CARDS */}
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
                 {dataset.generatedKpis.map((kpi, i) => (
@@ -304,15 +443,15 @@ export default function DynamicAutoDashboard() {
                     <div>
                       <h3 className="font-bold text-white flex items-center gap-2">
                         <BarChart3 className="w-4 h-4 text-[#7CFF4F]" />
-                        Evolução Temporal ({dataset.timeColumn || 'Ordem dos Registros'})
+                        Evolução Temporal ({dataset.timeColumn || 'Linhas da Aba'})
                       </h3>
-                      <p className="text-xs text-white/40">Métrica: {dataset.primaryNumericColumn || 'Valores'}</p>
+                      <p className="text-xs text-white/40">Métrica: {activeNumericCol || 'Valores'}</p>
                     </div>
                   </div>
 
                   <div className="h-[280px] w-full">
                     <ResponsiveContainer width="100%" height="100%">
-                      <AreaChart data={dataset.timeSeriesData}>
+                      <AreaChart data={dynamicTimeSeriesData}>
                         <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
                         <XAxis dataKey="date" stroke="rgba(255,255,255,0.4)" fontSize={11} />
                         <YAxis stroke="rgba(255,255,255,0.4)" fontSize={11} />
@@ -327,23 +466,23 @@ export default function DynamicAutoDashboard() {
                 <div className="p-6 rounded-2xl bg-[#121212]/80 backdrop-blur-xl border border-white/10 space-y-4">
                   <div>
                     <h3 className="font-bold text-white">
-                      Distribuição por {dataset.primaryCategoryColumn || 'Categoria'}
+                      Distribuição por {activeCategoryCol || 'Categoria'}
                     </h3>
-                    <p className="text-xs text-white/40">Segmentação proporcional das entradas</p>
+                    <p className="text-xs text-white/40">Proporção por {activeCategoryCol || 'Grupo'}</p>
                   </div>
 
                   <div className="h-[200px] w-full">
                     <ResponsiveContainer width="100%" height="100%">
                       <PieChart>
                         <Pie
-                          data={dataset.categoryDistribution}
+                          data={dynamicCategoryData}
                           cx="50%"
                           cy="50%"
                           innerRadius={50}
                           outerRadius={75}
                           dataKey="value"
                         >
-                          {dataset.categoryDistribution.map((entry, index) => (
+                          {dynamicCategoryData.map((entry, index) => (
                             <Cell key={`cell-${index}`} fill={entry.color} />
                           ))}
                         </Pie>
@@ -353,7 +492,7 @@ export default function DynamicAutoDashboard() {
                   </div>
 
                   <div className="space-y-1 pt-2 border-t border-white/10 text-xs">
-                    {dataset.categoryDistribution.map((c, idx) => (
+                    {dynamicCategoryData.map((c, idx) => (
                       <div key={idx} className="flex justify-between items-center">
                         <span className="flex items-center gap-1.5 text-white/70">
                           <span className="w-2 h-2 rounded-full" style={{ backgroundColor: c.color }} />
@@ -421,13 +560,13 @@ export default function DynamicAutoDashboard() {
 
               <div className="text-sm text-white/80 space-y-3 leading-relaxed">
                 <p>
-                  ✨ <strong>Diagnóstico de Dados</strong>: O dataset <code>{dataset.name}</code> possui {dataset.rowCount} registros processados e {dataset.columnCount} atributos indexados.
+                  ✨ <strong>Diagnóstico da Aba ({dataset.sheetName})</strong>: O dataset <code>{dataset.name}</code> possui {dataset.rowCount} registros processados na aba ativa e {dataset.columnCount} colunas estruturadas.
                 </p>
                 <p>
-                  📈 <strong>Comportamento da Métrica Principal</strong>: A variável <code>{dataset.primaryNumericColumn || 'Principal'}</code> apresentou tendência consistente ao longo da série temporal.
+                  📈 <strong>Comportamento da Métrica Principal</strong>: A variável <code>{activeNumericCol || 'Principal'}</code> apresentou volume total relevante acumulado.
                 </p>
                 <p>
-                  🛡️ <strong>Integridade e Qualidade</strong>: Nenhuma anomalia crítica de inconsistência de tipo foi detectada nas colunas principais.
+                  🛡️ <strong>Outras Abas Encontradas</strong>: {dataset.availableSheets.length > 1 ? `Esta planilha possui ${dataset.availableSheets.length} abas (${dataset.availableSheets.join(', ')}). Use o seletor de abas para alternar a visualização.` : 'Planilha de aba única.'}
                 </p>
               </div>
             </div>

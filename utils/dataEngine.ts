@@ -1,7 +1,7 @@
 /**
- * OBSIDIAN NEXUS — Auto Data Engine & Schema Profiler (Versão Ultra-Robusta)
- * Analisa dinamicamente planilhas (CSV, XLSX, XLS) e Bancos de Dados
- * garantindo tratamento de abas múltiplas, cabeçalhos na linha 2+, e dados formatados.
+ * OBSIDIAN NEXUS — Auto Data Engine & Schema Profiler (Versão V3 - Multi-Aba Inteligente)
+ * Trata descarte de abas de 'Instruções'/'Capa', remoção de colunas __EMPTY
+ * e seleção automática da aba principal de dados financeiros.
  */
 
 export interface ColumnProfile {
@@ -17,6 +17,8 @@ export interface ColumnProfile {
 
 export interface ParsedDataset {
   name: string;
+  sheetName: string;
+  availableSheets: string[];
   rowCount: number;
   columnCount: number;
   columns: ColumnProfile[];
@@ -38,12 +40,14 @@ export interface GeneratedKpi {
   iconType: 'dollar' | 'users' | 'target' | 'activity';
 }
 
-// Detectar se o valor é uma data válida ou objeto Date do SheetJS
+// Ignorar abas de metadados/instruções ao escolher a aba padrão
+export const IGNORED_SHEET_KEYWORDS = ['instruçoes', 'instruções', 'instructions', 'capa', 'readme', 'help', 'sobre', 'menu', 'config', 'modelo'];
+
+// Detectar se o valor é uma data válida ou serial do Excel
 function isDateValue(val: any): boolean {
   if (val === null || val === undefined || val === '') return false;
   if (val instanceof Date && !isNaN(val.getTime())) return true;
   if (typeof val === 'number') {
-    // Número serial de data do Excel (ex: 45000)
     return val > 35000 && val < 60000;
   }
   if (typeof val === 'string') {
@@ -61,17 +65,13 @@ function parseNumericValue(val: any): number | null {
   if (typeof val === 'number') return isNaN(val) ? null : val;
   if (typeof val === 'string') {
     const str = val.trim();
-    // Se a string contiver letras que não sejam de moeda, ignorar
     if (/[a-zA-Z]/i.test(str.replace(/[R$€£]/gi, ''))) return null;
     
-    // Substituir formatação de moeda brasileira/europeia ou americana
     let cleaned = str.replace(/[R$€£\s]/g, '');
     if (cleaned.includes(',') && cleaned.includes('.')) {
       if (cleaned.indexOf('.') < cleaned.indexOf(',')) {
-        // Formato BR/EU: 1.500,50 -> 1500.50
         cleaned = cleaned.replace(/\./g, '').replace(',', '.');
       } else {
-        // Formato US: 1,500.50 -> 1500.50
         cleaned = cleaned.replace(/,/g, '');
       }
     } else if (cleaned.includes(',')) {
@@ -85,26 +85,38 @@ function parseNumericValue(val: any): number | null {
 }
 
 // Motor Principal de Perfilamento de Dados
-export function profileDataset(dataName: string, rawRows: Record<string, any>[]): ParsedDataset {
-  // Filtrar linhas completamente vazias
+export function profileDataset(
+  dataName: string, 
+  rawRows: Record<string, any>[], 
+  sheetName: string = 'Dados',
+  availableSheets: string[] = []
+): ParsedDataset {
+  // Filtrar linhas vazias e remover colunas __EMPTY indesejadas
   const cleanRows = rawRows.filter((row) => {
     if (!row || typeof row !== 'object') return false;
     return Object.values(row).some((v) => v !== null && v !== undefined && String(v).trim() !== '');
   });
 
   if (cleanRows.length === 0) {
-    throw new Error('Não foram encontradas linhas de dados válidos na planilha.');
+    throw new Error(`A aba "${sheetName}" não possui linhas com dados legíveis.`);
   }
 
-  // Normalizar nomes das colunas
-  const rawHeaders = Object.keys(cleanRows[0]);
-  const columnNames = rawHeaders.map((h, idx) => (h && h.trim() ? h.trim() : `Coluna_${idx + 1}`));
-  
-  // Reconstruir linhas sanitizadas
+  // Filtrar cabeçalhos: excluir colunas __EMPTY e colunas onde quase tudo é nulo
+  const allKeys = Object.keys(cleanRows[0]);
+  const validKeys = allKeys.filter((k) => {
+    if (!k || k.startsWith('__EMPTY')) return false;
+    // Verificar se a coluna possui pelo menos 1 valor preenchido nas linhas
+    const hasValues = cleanRows.some(r => r[k] !== null && r[k] !== undefined && String(r[k]).trim() !== '');
+    return hasValues;
+  });
+
+  // Se todas as colunas eram __EMPTY (ex: sem linha de cabeçalho explícita), recriar com nomes genéricos
+  const finalKeys = validKeys.length > 0 ? validKeys : allKeys.map((_, i) => `Coluna_${i + 1}`);
+
   const sanitizedRows = cleanRows.map((row) => {
     const newRow: Record<string, any> = {};
-    rawHeaders.forEach((origHeader, idx) => {
-      newRow[columnNames[idx]] = row[origHeader];
+    finalKeys.forEach((key) => {
+      newRow[key] = row[key];
     });
     return newRow;
   });
@@ -112,7 +124,7 @@ export function profileDataset(dataName: string, rawRows: Record<string, any>[])
   const rowCount = sanitizedRows.length;
   const columnProfiles: ColumnProfile[] = [];
 
-  columnNames.forEach((col) => {
+  finalKeys.forEach((col) => {
     const values = sanitizedRows.map((r) => r[col]).filter((v) => v !== null && v !== undefined && String(v).trim() !== '');
     const uniqueCount = new Set(values.map(v => String(v))).size;
     const sampleValues = values.slice(0, 5);
@@ -159,19 +171,19 @@ export function profileDataset(dataName: string, rawRows: Record<string, any>[])
   });
 
   // Selecionar colunas estratégicas para o Dashboard
-  const timeCol = columnProfiles.find((c) => c.type === 'datetime')?.name;
+  const timeCol = columnProfiles.find((c) => c.type === 'datetime')?.name || columnProfiles.find(c => c.name.toLowerCase().includes('data') || c.name.toLowerCase().includes('date') || c.name.toLowerCase().includes('mês') || c.name.toLowerCase().includes('ano'))?.name;
   const numericCols = columnProfiles.filter((c) => c.type === 'numeric');
-  const categoryCols = columnProfiles.filter((c) => c.type === 'categorical');
+  const categoryCols = columnProfiles.filter((c) => c.type === 'categorical' && !c.name.startsWith('__EMPTY'));
 
   const primaryNumeric = numericCols[0]?.name;
   const secondaryNumeric = numericCols[1]?.name;
-  const primaryCategory = categoryCols[0]?.name;
+  const primaryCategory = categoryCols[0]?.name || columnProfiles.find(c => c.type === 'text' && c.uniqueCount > 1 && c.uniqueCount <= 30)?.name;
 
   // Gerar KPIs automáticos
   const generatedKpis: GeneratedKpi[] = [];
 
   generatedKpis.push({
-    label: 'Total de Linhas Processadas',
+    label: 'Total de Registros',
     value: rowCount.toLocaleString('pt-BR'),
     subtext: `${columnProfiles.length} Colunas Estruturadas`,
     type: 'count',
@@ -219,10 +231,9 @@ export function profileDataset(dataName: string, rawRows: Record<string, any>[])
       .sort((a, b) => a.date.localeCompare(b.date))
       .slice(0, 30);
   } else {
-    // Fallback: usar índice das primeiras 15 linhas
-    timeSeriesData = sanitizedRows.slice(0, 15).map((r, idx) => ({
-      date: `Item ${idx + 1}`,
-      valor: primaryNumeric ? parseNumericValue(r[primaryNumeric]) || 0 : idx * 10,
+    timeSeriesData = sanitizedRows.slice(0, 20).map((r, idx) => ({
+      date: `Linha ${idx + 1}`,
+      valor: primaryNumeric ? (parseNumericValue(r[primaryNumeric]) || 0) : idx * 10,
     }));
   }
 
@@ -243,11 +254,13 @@ export function profileDataset(dataName: string, rawRows: Record<string, any>[])
         value: Math.round(value * 100) / 100,
         color: colors[idx % colors.length],
       }))
-      .slice(0, 6);
+      .slice(0, 8);
   }
 
   return {
     name: dataName,
+    sheetName,
+    availableSheets,
     rowCount,
     columnCount: columnProfiles.length,
     columns: columnProfiles,
