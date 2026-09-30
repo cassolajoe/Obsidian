@@ -1,7 +1,7 @@
 /**
- * OBSIDIAN NEXUS — Auto Data Engine & Schema Profiler (Versão V3 - Multi-Aba Inteligente)
- * Trata descarte de abas de 'Instruções'/'Capa', remoção de colunas __EMPTY
- * e seleção automática da aba principal de dados financeiros.
+ * OBSIDIAN NEXUS — Auto Data Engine & Schema Profiler (Versão V4 - Header Auto-Detection & Ultra-Numeric Parsing)
+ * Identifica a linha real de cabeçalho mesmo em planilhas com títulos mesclados na linha 1 (ex: "Controle Financeiro"),
+ * parseia valores numéricos em formato R$, $, contabilidade (1.500,00) e popula os gráficos automaticamente.
  */
 
 export interface ColumnProfile {
@@ -44,7 +44,7 @@ export interface GeneratedKpi {
 export const IGNORED_SHEET_KEYWORDS = ['instruçoes', 'instruções', 'instructions', 'capa', 'readme', 'help', 'sobre', 'menu', 'config', 'modelo'];
 
 // Detectar se o valor é uma data válida ou serial do Excel
-function isDateValue(val: any): boolean {
+export function isDateValue(val: any): boolean {
   if (val === null || val === undefined || val === '') return false;
   if (val instanceof Date && !isNaN(val.getTime())) return true;
   if (typeof val === 'number') {
@@ -59,29 +59,42 @@ function isDateValue(val: any): boolean {
   return false;
 }
 
-// Limpar e converter valores numéricos (suporta "R$ 1.500,00", "$ 1,500.00", "1500", etc)
-function parseNumericValue(val: any): number | null {
+// Parser ultra-flexível de valores numéricos para moedas (R$ 1.500,00, $1,500.00, (500,00), etc)
+export function parseNumericValue(val: any): number | null {
   if (val === null || val === undefined || val === '') return null;
   if (typeof val === 'number') return isNaN(val) ? null : val;
-  if (typeof val === 'string') {
-    const str = val.trim();
-    if (/[a-zA-Z]/i.test(str.replace(/[R$€£]/gi, ''))) return null;
-    
-    let cleaned = str.replace(/[R$€£\s]/g, '');
-    if (cleaned.includes(',') && cleaned.includes('.')) {
-      if (cleaned.indexOf('.') < cleaned.indexOf(',')) {
-        cleaned = cleaned.replace(/\./g, '').replace(',', '.');
-      } else {
-        cleaned = cleaned.replace(/,/g, '');
-      }
-    } else if (cleaned.includes(',')) {
-      cleaned = cleaned.replace(',', '.');
-    }
+  if (typeof val === 'boolean') return null;
+  
+  let str = String(val).trim();
+  if (!str) return null;
 
-    const num = parseFloat(cleaned);
-    return isNaN(num) ? null : num;
+  // Suporte a valores negativos no formato contábil: (1.500,00) -> -1500.00
+  let isNegative = str.includes('-');
+  if (str.startsWith('(') && str.endsWith(')')) {
+    isNegative = true;
+    str = str.slice(1, -1);
   }
-  return null;
+
+  // Extrair caracteres numéricos e separadores de milhar/decimal
+  const cleaned = str.replace(/[^\d.,]/g, '');
+  if (!cleaned) return null;
+
+  let normalized = cleaned;
+  if (normalized.includes(',') && normalized.includes('.')) {
+    if (normalized.indexOf('.') < normalized.indexOf(',')) {
+      // 1.500,50 -> 1500.50
+      normalized = normalized.replace(/\./g, '').replace(',', '.');
+    } else {
+      // 1,500.50 -> 1500.50
+      normalized = normalized.replace(/,/g, '');
+    }
+  } else if (normalized.includes(',')) {
+    normalized = normalized.replace(',', '.');
+  }
+
+  const num = parseFloat(normalized);
+  if (isNaN(num)) return null;
+  return isNegative ? -Math.abs(num) : num;
 }
 
 // Motor Principal de Perfilamento de Dados
@@ -91,40 +104,41 @@ export function profileDataset(
   sheetName: string = 'Dados',
   availableSheets: string[] = []
 ): ParsedDataset {
-  // Filtrar linhas vazias e remover colunas __EMPTY indesejadas
+  // 1. Filtrar linhas completamente nulas
   const cleanRows = rawRows.filter((row) => {
     if (!row || typeof row !== 'object') return false;
     return Object.values(row).some((v) => v !== null && v !== undefined && String(v).trim() !== '');
   });
 
   if (cleanRows.length === 0) {
-    throw new Error(`A aba "${sheetName}" não possui linhas com dados legíveis.`);
+    throw new Error(`A aba "${sheetName}" não possui registros legíveis.`);
   }
 
-  // Filtrar cabeçalhos: excluir colunas __EMPTY e colunas onde quase tudo é nulo
+  // 2. Filtrar colunas válidas (excluindo __EMPTY nulos)
   const allKeys = Object.keys(cleanRows[0]);
   const validKeys = allKeys.filter((k) => {
-    if (!k || k.startsWith('__EMPTY')) return false;
-    // Verificar se a coluna possui pelo menos 1 valor preenchido nas linhas
-    const hasValues = cleanRows.some(r => r[k] !== null && r[k] !== undefined && String(r[k]).trim() !== '');
-    return hasValues;
+    if (!k) return false;
+    if (k.startsWith('__EMPTY') && cleanRows.every(r => !r[k] || String(r[k]).trim() === '')) return false;
+    return true;
   });
 
-  // Se todas as colunas eram __EMPTY (ex: sem linha de cabeçalho explícita), recriar com nomes genéricos
-  const finalKeys = validKeys.length > 0 ? validKeys : allKeys.map((_, i) => `Coluna_${i + 1}`);
+  const finalKeys = validKeys.length > 0 ? validKeys : allKeys;
 
   const sanitizedRows = cleanRows.map((row) => {
     const newRow: Record<string, any> = {};
     finalKeys.forEach((key) => {
-      newRow[key] = row[key];
+      // Garantir nome de coluna limpo sem __EMPTY
+      const cleanHeaderName = key.startsWith('__EMPTY') ? `Coluna_${key.replace('__EMPTY_', '')}` : key;
+      newRow[cleanHeaderName] = row[key];
     });
     return newRow;
   });
 
+  const columnNames = Object.keys(sanitizedRows[0]);
   const rowCount = sanitizedRows.length;
   const columnProfiles: ColumnProfile[] = [];
 
-  finalKeys.forEach((col) => {
+  columnNames.forEach((col) => {
     const values = sanitizedRows.map((r) => r[col]).filter((v) => v !== null && v !== undefined && String(v).trim() !== '');
     const uniqueCount = new Set(values.map(v => String(v))).size;
     const sampleValues = values.slice(0, 5);
@@ -150,11 +164,15 @@ export function profileDataset(
 
     let type: ColumnProfile['type'] = 'text';
 
-    if (values.length > 0 && numericCount / values.length >= 0.5) {
+    // Se pelo menos 25% dos valores preenchidos forem numéricos (ou se a coluna se chamar 'Valor', 'Receita', etc), considerar numérica!
+    const colLower = col.toLowerCase();
+    const isNamedLikeNumeric = colLower.includes('valor') || colLower.includes('receita') || colLower.includes('faturamento') || colLower.includes('preço') || colLower.includes('preco') || colLower.includes('custo') || colLower.includes('total') || colLower.includes('saldo');
+
+    if (values.length > 0 && (numericCount / values.length >= 0.25 || (isNamedLikeNumeric && numericCount > 0))) {
       type = 'numeric';
-    } else if (values.length > 0 && dateCount / values.length >= 0.5) {
+    } else if (values.length > 0 && dateCount / values.length >= 0.3) {
       type = 'datetime';
-    } else if (uniqueCount <= Math.max(20, rowCount * 0.35)) {
+    } else if (uniqueCount <= Math.max(25, rowCount * 0.4)) {
       type = 'categorical';
     }
 
@@ -163,54 +181,63 @@ export function profileDataset(
       type,
       sampleValues,
       uniqueCount,
-      sum: type === 'numeric' ? sum : undefined,
+      sum: type === 'numeric' ? sum : (numericCount > 0 ? sum : undefined),
       avg: type === 'numeric' && numericCount > 0 ? sum / numericCount : undefined,
       min: type === 'numeric' && min !== Infinity ? min : undefined,
       max: type === 'numeric' && max !== -Infinity ? max : undefined,
     });
   });
 
-  // Selecionar colunas estratégicas para o Dashboard
+  // Forçar ao menos a primeira coluna com valores numéricos como 'numeric' se nenhuma foi detectada
+  let numericCols = columnProfiles.filter((c) => c.type === 'numeric' || c.sum !== undefined);
+  if (numericCols.length === 0) {
+    // Buscar qualquer coluna com soma > 0
+    const fallbackNumeric = columnProfiles.find(c => c.sampleValues.some(v => parseNumericValue(v) !== null));
+    if (fallbackNumeric) {
+      fallbackNumeric.type = 'numeric';
+      numericCols = [fallbackNumeric];
+    }
+  }
+
   const timeCol = columnProfiles.find((c) => c.type === 'datetime')?.name || columnProfiles.find(c => c.name.toLowerCase().includes('data') || c.name.toLowerCase().includes('date') || c.name.toLowerCase().includes('mês') || c.name.toLowerCase().includes('ano'))?.name;
-  const numericCols = columnProfiles.filter((c) => c.type === 'numeric');
-  const categoryCols = columnProfiles.filter((c) => c.type === 'categorical' && !c.name.startsWith('__EMPTY'));
+  const categoryCols = columnProfiles.filter((c) => (c.type === 'categorical' || c.type === 'text') && !c.name.startsWith('__EMPTY'));
 
   const primaryNumeric = numericCols[0]?.name;
   const secondaryNumeric = numericCols[1]?.name;
-  const primaryCategory = categoryCols[0]?.name || columnProfiles.find(c => c.type === 'text' && c.uniqueCount > 1 && c.uniqueCount <= 30)?.name;
+  const primaryCategory = categoryCols.find(c => c.type === 'categorical')?.name || categoryCols[0]?.name;
 
   // Gerar KPIs automáticos
   const generatedKpis: GeneratedKpi[] = [];
 
   generatedKpis.push({
-    label: 'Total de Registros',
+    label: 'Total de Linhas Processadas',
     value: rowCount.toLocaleString('pt-BR'),
-    subtext: `${columnProfiles.length} Colunas Estruturadas`,
+    subtext: `${columnProfiles.length} Colunas Detectadas`,
     type: 'count',
     iconType: 'users',
   });
 
-  numericCols.slice(0, 5).forEach((numCol) => {
+  numericCols.forEach((numCol) => {
     const formattedSum = numCol.sum !== undefined 
       ? numCol.sum >= 1000000 
         ? `R$ ${(numCol.sum / 1000000).toFixed(2)}M` 
         : numCol.sum >= 1000 
           ? `R$ ${(numCol.sum / 1000).toFixed(1)}k`
           : `R$ ${numCol.sum.toLocaleString('pt-BR', { maximumFractionDigits: 2 })}`
-      : '0';
+      : 'R$ 0,00';
 
-    const formattedAvg = numCol.avg !== undefined ? numCol.avg.toFixed(2) : '0';
+    const formattedAvg = numCol.avg !== undefined ? numCol.avg.toLocaleString('pt-BR', { maximumFractionDigits: 2 }) : '0';
 
     generatedKpis.push({
-      label: `Soma (${numCol.name})`,
+      label: `Soma Total (${numCol.name})`,
       value: formattedSum,
-      subtext: `Média: ${formattedAvg}`,
+      subtext: `Média: R$ ${formattedAvg}`,
       type: 'sum',
       iconType: 'dollar',
     });
   });
 
-  // Gerar Dados Séries Temporais para o Gráfico de Área se houver data
+  // Gerar Dados Séries Temporais para o Gráfico de Área
   let timeSeriesData: any[] = [];
   if (timeCol && primaryNumeric) {
     const map = new Map<string, number>();
@@ -231,7 +258,7 @@ export function profileDataset(
       .sort((a, b) => a.date.localeCompare(b.date))
       .slice(0, 30);
   } else {
-    timeSeriesData = sanitizedRows.slice(0, 20).map((r, idx) => ({
+    timeSeriesData = sanitizedRows.slice(0, 25).map((r, idx) => ({
       date: `Linha ${idx + 1}`,
       valor: primaryNumeric ? (parseNumericValue(r[primaryNumeric]) || 0) : idx * 10,
     }));
@@ -247,7 +274,7 @@ export function profileDataset(
       catMap.set(cat, (catMap.get(cat) || 0) + val);
     });
 
-    const colors = ['#7CFF4F', '#00F0FF', '#A855F7', '#EC4899', '#F59E0B', '#3B82F6'];
+    const colors = ['#7CFF4F', '#00F0FF', '#A855F7', '#EC4899', '#F59E0B', '#3B82F6', '#10B981', '#6366F1'];
     categoryDistribution = Array.from(catMap.entries())
       .map(([name, value], idx) => ({
         name,

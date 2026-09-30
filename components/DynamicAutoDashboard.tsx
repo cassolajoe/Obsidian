@@ -12,7 +12,48 @@ import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
   BarChart, Bar, PieChart, Pie, Cell 
 } from 'recharts';
-import { profileDataset, ParsedDataset, IGNORED_SHEET_KEYWORDS } from '@/utils/dataEngine';
+import { profileDataset, ParsedDataset, IGNORED_SHEET_KEYWORDS, parseNumericValue } from '@/utils/dataEngine';
+
+// Função para extrair linhas da aba identificando a linha real de cabeçalho (mesmo com banners mesclados no topo)
+function extractBestRowsFromSheet(worksheet: XLSX.WorkSheet): Record<string, any>[] {
+  if (!worksheet) return [];
+
+  // Converter aba para matriz de linhas (header: 1)
+  const matrix = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' }) as any[][];
+  const nonEmptyRows = matrix.filter(r => r && r.length > 0 && r.some(cell => cell !== null && cell !== ''));
+
+  if (nonEmptyRows.length === 0) return [];
+
+  // 1. Procurar a linha que possui o maior número de células preenchidas (que representa o cabeçalho real)
+  let maxFilledIndex = 0;
+  let maxFilledCount = 0;
+
+  for (let i = 0; i < Math.min(10, nonEmptyRows.length); i++) {
+    const filledCount = nonEmptyRows[i].filter(cell => cell !== null && cell !== undefined && String(cell).trim() !== '').length;
+    if (filledCount > maxFilledCount) {
+      maxFilledCount = filledCount;
+      maxFilledIndex = i;
+    }
+  }
+
+  // Se a linha com maior preenchimento tiver 2+ colunas, usá-la como cabeçalho
+  if (maxFilledCount >= 2 && maxFilledIndex >= 0) {
+    const headerRow = nonEmptyRows[maxFilledIndex];
+    const headers = headerRow.map((h, i) => (h && String(h).trim() ? String(h).trim() : `Coluna_${i + 1}`));
+
+    const dataRows = nonEmptyRows.slice(maxFilledIndex + 1);
+    return dataRows.map((row) => {
+      const obj: Record<string, any> = {};
+      headers.forEach((h, i) => {
+        obj[h] = row[i] !== undefined ? row[i] : '';
+      });
+      return obj;
+    });
+  }
+
+  // Fallback: usar sheet_to_json simples se não encontrou padrão de matriz
+  return XLSX.utils.sheet_to_json(worksheet, { defval: '' }) as Record<string, any>[];
+}
 
 export default function DynamicAutoDashboard() {
   const [dataset, setDataset] = useState<ParsedDataset | null>(null);
@@ -81,7 +122,7 @@ export default function DynamicAutoDashboard() {
             setSelectedCategoryCol(profiled.primaryCategoryColumn || '');
           } catch (err: any) {
             setErrorMessage(err.message || 'Erro ao analisar o arquivo CSV.');
-          } finally {
+          } fontally {
             setIsLoading(false);
           }
         },
@@ -107,32 +148,12 @@ export default function DynamicAutoDashboard() {
 
           const sheetsMap: Record<string, Record<string, any>[]> = {};
           
-          // Extrair todas as abas para memória
+          // Extrair todas as abas usando detector de matriz de cabeçalho real
           workbook.SheetNames.forEach((sheetName) => {
             const worksheet = workbook.Sheets[sheetName];
             if (!worksheet) return;
 
-            let rows = XLSX.utils.sheet_to_json(worksheet, { defval: '' }) as Record<string, any>[];
-            
-            // Fallback se não encontrar dados simples
-            if (!rows || rows.length === 0) {
-              const matrix = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' }) as any[][];
-              const nonEmptyMatrix = matrix.filter(r => r && r.length > 0 && r.some(cell => cell !== null && cell !== ''));
-              
-              if (nonEmptyMatrix.length > 1) {
-                const headerRow = nonEmptyMatrix[0];
-                const headers = headerRow.map((h, i) => (h && String(h).trim() ? String(h).trim() : `Coluna_${i + 1}`));
-                
-                rows = nonEmptyMatrix.slice(1).map(row => {
-                  const obj: Record<string, any> = {};
-                  headers.forEach((h, i) => {
-                    obj[h] = row[i] !== undefined ? row[i] : '';
-                  });
-                  return obj;
-                });
-              }
-            }
-
+            const rows = extractBestRowsFromSheet(worksheet);
             if (rows && rows.length > 0) {
               sheetsMap[sheetName] = rows;
             }
@@ -202,7 +223,7 @@ export default function DynamicAutoDashboard() {
     }, 1000);
   };
 
-  // Atualizar dados de séries temporais se o usuário trocar a coluna numérica selecionada
+  // Atualizar dados dos gráficos dinamicamente com base nas colunas selecionadas
   const activeNumericCol = selectedNumericCol || dataset?.primaryNumericColumn;
   const activeCategoryCol = selectedCategoryCol || dataset?.primaryCategoryColumn;
 
@@ -218,7 +239,7 @@ export default function DynamicAutoDashboard() {
           } else if (rawDate) {
             dateKey = String(rawDate).slice(0, 10);
           }
-          const val = parseFloat(String(r[activeNumericCol] || '0').replace(/[^\d.-]/g, '')) || 0;
+          const val = parseNumericValue(r[activeNumericCol]) || 0;
           map.set(dateKey, (map.get(dateKey) || 0) + val);
         });
         return Array.from(map.entries())
@@ -227,9 +248,9 @@ export default function DynamicAutoDashboard() {
           .slice(0, 30);
       })()
     ) : (
-      dataset.rawRows.slice(0, 20).map((r, idx) => ({
+      dataset.rawRows.slice(0, 25).map((r, idx) => ({
         date: `Linha ${idx + 1}`,
-        valor: activeNumericCol ? (parseFloat(String(r[activeNumericCol] || '0').replace(/[^\d.-]/g, '')) || 0) : idx * 10,
+        valor: activeNumericCol ? (parseNumericValue(r[activeNumericCol]) || 0) : idx * 10,
       }))
     )
   ) : [];
@@ -239,10 +260,10 @@ export default function DynamicAutoDashboard() {
       const catMap = new Map<string, number>();
       dataset.rawRows.forEach((r) => {
         const cat = String(r[activeCategoryCol] || 'Sem Categoria');
-        const val = activeNumericCol ? (parseFloat(String(r[activeNumericCol] || '1').replace(/[^\d.-]/g, '')) || 1) : 1;
+        const val = activeNumericCol ? (parseNumericValue(r[activeNumericCol]) || 1) : 1;
         catMap.set(cat, (catMap.get(cat) || 0) + val);
       });
-      const colors = ['#7CFF4F', '#00F0FF', '#A855F7', '#EC4899', '#F59E0B', '#3B82F6'];
+      const colors = ['#7CFF4F', '#00F0FF', '#A855F7', '#EC4899', '#F59E0B', '#3B82F6', '#10B981', '#6366F1'];
       return Array.from(catMap.entries())
         .map(([name, value], idx) => ({
           name,
@@ -260,7 +281,7 @@ export default function DynamicAutoDashboard() {
       <div className="p-6 rounded-2xl bg-[#121212]/80 backdrop-blur-2xl border border-white/10 flex flex-wrap items-center justify-between gap-4 shadow-[0_10px_30px_rgba(0,0,0,0.5)]">
         <div>
           <span className="px-3 py-1 rounded-full bg-[#7CFF4F]/10 border border-[#7CFF4F]/30 text-xs font-mono text-[#7CFF4F]">
-            AUTO-DASHBOARD ENGINE V3 (MULTI-ABA)
+            AUTO-DASHBOARD ENGINE V4 (SMART PARSER)
           </span>
           <h2 className="text-xl font-bold text-white mt-2 flex items-center gap-2">
             <Sparkles className="w-5 h-5 text-[#7CFF4F]" />
@@ -357,7 +378,7 @@ export default function DynamicAutoDashboard() {
                   )}
                 </div>
                 <span className="text-[11px] text-white/50 font-mono">
-                  Aba Ativa: <strong className="text-white">{dataset.sheetName}</strong> • {dataset.rowCount} registros • {dataset.columnCount} colunas
+                  Aba Ativa: <strong className="text-white">{dataset.sheetName}</strong> • {dataset.rowCount} registros • {dataset.columnCount} colunas detectadas
                 </span>
               </div>
             </div>
@@ -386,7 +407,7 @@ export default function DynamicAutoDashboard() {
               
               {/* INTERACTIVE COLUMN PICKERS */}
               <div className="p-4 rounded-xl bg-white/5 border border-white/10 flex flex-wrap items-center justify-between gap-4 text-xs">
-                <div className="flex items-center gap-4">
+                <div className="flex flex-wrap items-center gap-4">
                   <span className="text-white/50 font-mono">Personalizar Métricas:</span>
                   
                   {/* Seletor de Métrica Numérica */}
@@ -395,10 +416,12 @@ export default function DynamicAutoDashboard() {
                     <select
                       value={activeNumericCol || ''}
                       onChange={(e) => setSelectedNumericCol(e.target.value)}
-                      className="px-2.5 py-1 rounded-lg bg-[#121212] border border-white/20 text-white focus:outline-none"
+                      className="px-2.5 py-1 rounded-lg bg-[#121212] border border-[#7CFF4F]/40 text-white focus:outline-none"
                     >
-                      {dataset.columns.filter(c => c.type === 'numeric').map((col, idx) => (
-                        <option key={idx} value={col.name}>{col.name}</option>
+                      {dataset.columns.map((col, idx) => (
+                        <option key={idx} value={col.name}>
+                          {col.name} {col.type === 'numeric' ? '(Numérica)' : ''}
+                        </option>
                       ))}
                     </select>
                   </div>
@@ -411,7 +434,7 @@ export default function DynamicAutoDashboard() {
                       onChange={(e) => setSelectedCategoryCol(e.target.value)}
                       className="px-2.5 py-1 rounded-lg bg-[#121212] border border-white/20 text-white focus:outline-none"
                     >
-                      {dataset.columns.filter(c => !c.name.startsWith('__EMPTY')).map((col, idx) => (
+                      {dataset.columns.map((col, idx) => (
                         <option key={idx} value={col.name}>{col.name}</option>
                       ))}
                     </select>
@@ -419,7 +442,7 @@ export default function DynamicAutoDashboard() {
                 </div>
 
                 <span className="text-white/40 font-mono text-[10px]">
-                  Filtros aplicados em tempo real (60 FPS)
+                  Visualização dinâmica em tempo real (60 FPS)
                 </span>
               </div>
 
@@ -443,9 +466,9 @@ export default function DynamicAutoDashboard() {
                     <div>
                       <h3 className="font-bold text-white flex items-center gap-2">
                         <BarChart3 className="w-4 h-4 text-[#7CFF4F]" />
-                        Evolução Temporal ({dataset.timeColumn || 'Linhas da Aba'})
+                        Evolução Temporal ({dataset.timeColumn || 'Registros'})
                       </h3>
-                      <p className="text-xs text-white/40">Métrica: {activeNumericCol || 'Valores'}</p>
+                      <p className="text-xs text-white/40">Métrica Numérica: {activeNumericCol || 'Valores'}</p>
                     </div>
                   </div>
 
@@ -468,7 +491,7 @@ export default function DynamicAutoDashboard() {
                     <h3 className="font-bold text-white">
                       Distribuição por {activeCategoryCol || 'Categoria'}
                     </h3>
-                    <p className="text-xs text-white/40">Proporção por {activeCategoryCol || 'Grupo'}</p>
+                    <p className="text-xs text-white/40">Soma de {activeNumericCol || 'Valores'} por {activeCategoryCol || 'Grupo'}</p>
                   </div>
 
                   <div className="h-[200px] w-full">
@@ -563,10 +586,10 @@ export default function DynamicAutoDashboard() {
                   ✨ <strong>Diagnóstico da Aba ({dataset.sheetName})</strong>: O dataset <code>{dataset.name}</code> possui {dataset.rowCount} registros processados na aba ativa e {dataset.columnCount} colunas estruturadas.
                 </p>
                 <p>
-                  📈 <strong>Comportamento da Métrica Principal</strong>: A variável <code>{activeNumericCol || 'Principal'}</code> apresentou volume total relevante acumulado.
+                  📈 <strong>Comportamento da Métrica Principal</strong>: A variável <code>{activeNumericCol || 'Principal'}</code> apresentou volume total acumulado.
                 </p>
                 <p>
-                  🛡️ <strong>Outras Abas Encontradas</strong>: {dataset.availableSheets.length > 1 ? `Esta planilha possui ${dataset.availableSheets.length} abas (${dataset.availableSheets.join(', ')}). Use o seletor de abas para alternar a visualização.` : 'Planilha de aba única.'}
+                  🛡️ <strong>Outras Abas Encontradas</strong>: {dataset.availableSheets.length > 1 ? `Esta planilha possui ${dataset.availableSheets.length} abas (${dataset.availableSheets.join(', ')}). Use o seletor de abas no topo para alternar entre as abas.` : 'Planilha de aba única.'}
                 </p>
               </div>
             </div>
