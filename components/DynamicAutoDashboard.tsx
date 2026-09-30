@@ -140,7 +140,7 @@ export default function DynamicAutoDashboard() {
             throw new Error('Não foi possível carregar o buffer do arquivo.');
           }
 
-          const workbook = XLSX.read(buffer, { type: 'array', cellDates: true, cellFormulas: true });
+          const workbook = XLSX.read(buffer, { type: 'array', cellDates: true, cellFormula: true });
           
           if (!workbook.SheetNames || workbook.SheetNames.length === 0) {
             throw new Error('A planilha Excel não contém abas válidas.');
