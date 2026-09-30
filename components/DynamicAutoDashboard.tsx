@@ -122,7 +122,7 @@ export default function DynamicAutoDashboard() {
             setSelectedCategoryCol(profiled.primaryCategoryColumn || '');
           } catch (err: any) {
             setErrorMessage(err.message || 'Erro ao analisar o arquivo CSV.');
-          } fontally {
+          } finally {
             setIsLoading(false);
           }
         },
