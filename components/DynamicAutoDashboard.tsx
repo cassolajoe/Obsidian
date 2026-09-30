@@ -6,7 +6,7 @@ import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
 import { 
   UploadCloud, Database, FileSpreadsheet, Sparkles, CheckCircle2, 
-  BarChart3, Table as TableIcon, Layers, RefreshCw, ArrowRight, Server, ShieldCheck, Download, Search
+  BarChart3, Table as TableIcon, Layers, RefreshCw, ArrowRight, Server, ShieldCheck, Download, Search, AlertCircle
 } from 'lucide-react';
 import { 
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
@@ -20,6 +20,7 @@ export default function DynamicAutoDashboard() {
   const [activeView, setActiveView] = useState<'dashboard' | 'table' | 'ai'>('dashboard');
   const [searchTerm, setSearchTerm] = useState('');
   const [showDbModal, setShowDbModal] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   // Database Connection Form State
   const [dbConfig, setDbConfig] = useState({
@@ -33,12 +34,13 @@ export default function DynamicAutoDashboard() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Processar Arquivo (CSV, XLSX, XLS)
+  // Processar Arquivo (CSV, XLSX, XLS) com suporte a ArrayBuffer e varredura multi-aba
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     setIsLoading(true);
+    setErrorMessage(null);
     const fileName = file.name;
     const extension = fileName.split('.').pop()?.toLowerCase();
 
@@ -46,19 +48,22 @@ export default function DynamicAutoDashboard() {
       Papa.parse(file, {
         header: true,
         dynamicTyping: true,
-        skipEmptyLines: true,
+        skipEmptyLines: 'greedy',
         complete: (results) => {
           try {
+            if (!results.data || results.data.length === 0) {
+              throw new Error('O arquivo CSV não possui dados legíveis.');
+            }
             const profiled = profileDataset(fileName, results.data as Record<string, any>[]);
             setDataset(profiled);
           } catch (err: any) {
-            alert(err.message || 'Erro ao analisar o arquivo CSV.');
+            setErrorMessage(err.message || 'Erro ao analisar o arquivo CSV.');
           } finally {
             setIsLoading(false);
           }
         },
         error: () => {
-          alert('Erro ao ler o arquivo CSV.');
+          setErrorMessage('Erro ao ler a estrutura do arquivo CSV.');
           setIsLoading(false);
         },
       });
@@ -66,37 +71,95 @@ export default function DynamicAutoDashboard() {
       const reader = new FileReader();
       reader.onload = (evt) => {
         try {
-          const bstr = evt.target?.result;
-          const workbook = XLSX.read(bstr, { type: 'binary' });
-          const firstSheetName = workbook.SheetNames[0];
-          const worksheet = workbook.Sheets[firstSheetName];
-          const jsonRows = XLSX.utils.sheet_to_json(worksheet) as Record<string, any>[];
+          const buffer = evt.target?.result as ArrayBuffer;
+          if (!buffer) {
+            throw new Error('Não foi possível carregar o buffer do arquivo.');
+          }
 
-          const profiled = profileDataset(fileName, jsonRows);
+          const workbook = XLSX.read(buffer, { type: 'array', cellDates: true, cellFormulas: true });
+          
+          if (!workbook.SheetNames || workbook.SheetNames.length === 0) {
+            throw new Error('A planilha Excel não contém abas válidas.');
+          }
+
+          let jsonRows: Record<string, any>[] = [];
+          let activeSheetName = '';
+
+          // 1. Procurar a primeira aba com dados estruturados via sheet_to_json
+          for (const sheetName of workbook.SheetNames) {
+            const worksheet = workbook.Sheets[sheetName];
+            if (!worksheet) continue;
+            
+            const rows = XLSX.utils.sheet_to_json(worksheet, { defval: '' }) as Record<string, any>[];
+            if (rows && rows.length > 0) {
+              jsonRows = rows;
+              activeSheetName = sheetName;
+              break;
+            }
+          }
+
+          // 2. Fallback: Se não encontrou cabeçalhos na linha 1, tentar varredura de matriz (header: 1)
+          if (!jsonRows || jsonRows.length === 0) {
+            for (const sheetName of workbook.SheetNames) {
+              const worksheet = workbook.Sheets[sheetName];
+              if (!worksheet) continue;
+
+              const matrix = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' }) as any[][];
+              const nonEmptyMatrix = matrix.filter(r => r && r.length > 0 && r.some(cell => cell !== null && cell !== ''));
+              
+              if (nonEmptyMatrix.length > 1) {
+                // Primeira linha preenchida vira os cabeçalhos
+                const headerRow = nonEmptyMatrix[0];
+                const headers = headerRow.map((h, i) => (h && String(h).trim() ? String(h).trim() : `Coluna_${i + 1}`));
+                
+                jsonRows = nonEmptyMatrix.slice(1).map(row => {
+                  const obj: Record<string, any> = {};
+                  headers.forEach((h, i) => {
+                    obj[h] = row[i] !== undefined ? row[i] : '';
+                  });
+                  return obj;
+                });
+                activeSheetName = sheetName;
+                break;
+              }
+            }
+          }
+
+          if (!jsonRows || jsonRows.length === 0) {
+            throw new Error(`Nenhum dado estruturado foi encontrado nas abas da planilha "${fileName}".`);
+          }
+
+          const profiled = profileDataset(`${fileName} (${activeSheetName})`, jsonRows);
           setDataset(profiled);
         } catch (err: any) {
-          alert('Erro ao processar planilha Excel: ' + err.message);
+          setErrorMessage(err.message || 'Erro ao decodificar a planilha Excel.');
         } finally {
           setIsLoading(false);
         }
       };
-      reader.readAsBinaryString(file);
+
+      reader.onerror = () => {
+        setErrorMessage('Falha na leitura do arquivo Excel pelo navegador.');
+        setIsLoading(false);
+      };
+
+      reader.readAsArrayBuffer(file);
     } else {
-      alert('Formato de arquivo não suportado. Por favor insira um arquivo CSV, XLSX ou XLS.');
+      setErrorMessage('Formato não suportado. Envie um arquivo .csv, .xlsx ou .xls');
       setIsLoading(false);
     }
   };
 
-  // Simular Conexão e Leitura de Banco de Dados (Postgres, MySQL, SQL Server)
+  // Simular Conexão e Leitura de Banco de Dados
   const handleConnectDatabase = (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
     setShowDbModal(false);
+    setErrorMessage(null);
 
     setTimeout(() => {
-      // Gerar dataset sintético para a tabela importada do BD
-      const mockDbRows = Array.from({ length: 60 }).map((_, idx) => ({
-        id: `TX-${1000 + idx}`,
+      const mockDbRows = Array.from({ length: 80 }).map((_, idx) => ({
+        id_transacao: `TX-${1000 + idx}`,
         data_transacao: `2026-09-${(idx % 28 + 1).toString().padStart(2, '0')}`,
         canal_venda: ['Enterprise B2B', 'SaaS Inbound', 'Parceiros API', 'Marketplace'][idx % 4],
         valor_faturamento: Math.round(1500 + Math.random() * 8500),
@@ -107,7 +170,7 @@ export default function DynamicAutoDashboard() {
       const profiled = profileDataset(`${dbConfig.type}: ${dbConfig.database}.${dbConfig.table}`, mockDbRows);
       setDataset(profiled);
       setIsLoading(false);
-    }, 1200);
+    }, 1000);
   };
 
   return (
@@ -117,7 +180,7 @@ export default function DynamicAutoDashboard() {
       <div className="p-6 rounded-2xl bg-[#121212]/80 backdrop-blur-2xl border border-white/10 flex flex-wrap items-center justify-between gap-4 shadow-[0_10px_30px_rgba(0,0,0,0.5)]">
         <div>
           <span className="px-3 py-1 rounded-full bg-[#7CFF4F]/10 border border-[#7CFF4F]/30 text-xs font-mono text-[#7CFF4F]">
-            AUTO-DASHBOARD ENGINE
+            AUTO-DASHBOARD ENGINE V2
           </span>
           <h2 className="text-xl font-bold text-white mt-2 flex items-center gap-2">
             <Sparkles className="w-5 h-5 text-[#7CFF4F]" />
@@ -157,6 +220,14 @@ export default function DynamicAutoDashboard() {
         </div>
       </div>
 
+      {/* ERROR BANNER */}
+      {errorMessage && (
+        <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/30 flex items-center gap-3 text-red-400 text-xs font-semibold backdrop-blur-xl">
+          <AlertCircle className="w-5 h-5 flex-shrink-0" />
+          <span>{errorMessage}</span>
+        </div>
+      )}
+
       {/* DASHBOARD DISPLAY OR EMPTY STATE */}
       {!dataset ? (
         <div className="p-12 rounded-3xl bg-[#121212]/40 border-2 border-dashed border-white/15 backdrop-blur-2xl text-center space-y-4">
@@ -165,7 +236,7 @@ export default function DynamicAutoDashboard() {
           </div>
           <h3 className="text-lg font-bold text-white">Nenhum Dataset Carregado</h3>
           <p className="text-xs text-white/40 max-w-md mx-auto">
-            Faça upload de uma planilha ou conecte seu Banco de Dados (MySQL, Postgres, SQL Server) para que o Nexus AI construa todos os gráficos e KPIs automaticamente.
+            Faça upload de uma planilha (CSV, XLSX, XLS) ou conecte seu Banco de Dados (MySQL, Postgres, SQL Server) para que o Nexus AI construa todos os gráficos e KPIs automaticamente.
           </p>
 
           <div className="pt-4 flex justify-center gap-3">
@@ -323,15 +394,18 @@ export default function DynamicAutoDashboard() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-white/5">
-                    {dataset.rawRows.slice(0, 50).map((row, rIdx) => (
-                      <tr key={rIdx} className="hover:bg-white/5 transition-colors">
-                        {dataset.columns.map((col, cIdx) => (
-                          <td key={cIdx} className="p-3 font-mono text-white/80">
-                            {String(row[col.name] ?? '')}
-                          </td>
-                        ))}
-                      </tr>
-                    ))}
+                    {dataset.rawRows
+                      .filter(row => !searchTerm || Object.values(row).some(v => String(v).toLowerCase().includes(searchTerm.toLowerCase())))
+                      .slice(0, 50)
+                      .map((row, rIdx) => (
+                        <tr key={rIdx} className="hover:bg-white/5 transition-colors">
+                          {dataset.columns.map((col, cIdx) => (
+                            <td key={cIdx} className="p-3 font-mono text-white/80">
+                              {String(row[col.name] ?? '')}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
                   </tbody>
                 </table>
               </div>
