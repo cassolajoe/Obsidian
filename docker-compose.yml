@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  nexus-frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on:
+      - nexus-ai-core
+
+  nexus-ai-core:
+    build:
+      context: ./services/ai_engine
+    ports:
+      - "8000:8000"
+    command: uvicorn predictive_service:app --host 0.0.0.0 --port 8000
+
+  postgres-cluster:
+    image: timescale/timescaledb:latest-pg15
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: obsidian_nexus
+      POSTGRES_USER: nexus_admin
+      POSTGRES_PASSWORD: SecretEnterprisePassword2026!
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+
+  redis-cache:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+volumes:
+  postgres_data:
