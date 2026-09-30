@@ -5,12 +5,14 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { 
   TrendingUp, TrendingDown, DollarSign, Users, Target, Activity, 
   Sparkles, ShieldCheck, ArrowUpRight, Filter, Zap, Eye, Database, Send, RefreshCw,
-  LayoutDashboard, Layers, Cpu, Server, BarChart3, PieChart as PieIcon, Download, SlidersHorizontal, AlertTriangle
+  LayoutDashboard, Layers, Cpu, Server, BarChart3, PieChart as PieIcon, UploadCloud, FileSpreadsheet
 } from 'lucide-react';
 import { 
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
-  BarChart, Bar, PieChart, Pie, Cell, Legend
+  BarChart, Bar, PieChart, Pie, Cell 
 } from 'recharts';
+
+import DynamicAutoDashboard from '@/components/DynamicAutoDashboard';
 
 const revenueTrendData = [
   { month: 'Jan', receita: 3.4, projecao: 3.4 },
@@ -52,7 +54,7 @@ const connectorStatuses = [
 
 export default function ObsidianNexusDashboard() {
   const [executiveMode, setExecutiveMode] = useState(false);
-  const [activeTab, setActiveTab] = useState<'overview' | 'analytics' | 'ai' | 'connectors'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'autodash' | 'connectors'>('overview');
   const [aiQuery, setAiQuery] = useState('');
   const [aiResponse, setAiResponse] = useState<string | null>(null);
   const [isAiAnalyzing, setIsAiAnalyzing] = useState(false);
@@ -108,7 +110,7 @@ export default function ObsidianNexusDashboard() {
 
           {/* Tab Navigation */}
           <nav className="hidden md:flex gap-1 bg-white/5 p-1 rounded-xl border border-white/10">
-            {(['overview', 'analytics', 'ai', 'connectors'] as const).map((tab) => (
+            {(['overview', 'autodash', 'connectors'] as const).map((tab) => (
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
@@ -119,8 +121,7 @@ export default function ObsidianNexusDashboard() {
                 }`}
               >
                 {tab === 'overview' && 'Dashboard Visão Geral'}
-                {tab === 'analytics' && 'Visualizações Avançadas'}
-                {tab === 'ai' && 'Nexus AI Preditivo'}
+                {tab === 'autodash' && 'Upload & Auto-Dashboard Visuais'}
                 {tab === 'connectors' && 'Conectores (15)'}
               </button>
             ))}
@@ -186,6 +187,9 @@ export default function ObsidianNexusDashboard() {
             </div>
           </div>
         </motion.div>
+      ) : activeTab === 'autodash' ? (
+        /* DYNAMIC AUTO DASHBOARD TAB */
+        <DynamicAutoDashboard />
       ) : (
         /* STANDARD DASHBOARD WORKSPACE */
         <main className="space-y-6">
